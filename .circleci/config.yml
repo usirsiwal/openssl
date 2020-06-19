@@ -1,9 +1,15 @@
 version: 2
 
 jobs:
+  orbs:
+    win: circleci/windows@2.2.0
+
   build:
-    macos:  # indicate that we are using the macOS executor
-      xcode: 11.3.0 # indicate our selected version of Xcode
+    executor:
+      name: win/default
+      shell: powershell.exe
+    # macos:  # indicate that we are using the macOS executor
+    #  xcode: 11.3.0 # indicate our selected version of Xcode
     #docker:
     #  - image: "debian:stretch"
     steps:
