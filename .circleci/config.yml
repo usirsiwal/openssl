@@ -20,7 +20,7 @@ jobs:
       #    command: 'apt-get update && apt-get install -y gcc g++ make perl git ssh'
       - run:
           name: Creating Build Files
-          command: './config --prefix=/tmp/openssl'
+          command: 'perl Configure VC-WIN32 no-asm --prefix=c:/openssl'
       - run:
           name: Creating Binary Files
           command: 'make'
