@@ -21,9 +21,9 @@ jobs:
       - run:
           name: Creating Build Files
           command: 'perl Configure VC-WIN32 no-asm --prefix=c:/openssl'
-      - run:
-          name: run msdos
-          command: 'ms\do_ms'
+      #- run:
+      #    name: run msdos
+      #    command: 'ms\do_ms'
       - run:
           name: Creating Binary Files
           command: 'nmake -f ms\ntdll.mak'
