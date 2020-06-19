@@ -26,6 +26,8 @@ jobs:
   build_on_windows:
     runs-on: windows-2019
     steps:
+      - name: install nasm
+        run: choco install nasm
       - uses: actions/checkout@v2
       - name: configure
         run: perl Configure VC-WIN64A 
