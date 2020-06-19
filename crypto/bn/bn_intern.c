@@ -1,59 +1,14 @@
-/* ====================================================================
- * Copyright (c) 1998-2014 The OpenSSL Project.  All rights reserved.
+/*
+ * Copyright 2014-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    openssl-core@openssl.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
-#include "cryptlib.h"
-#include "bn_lcl.h"
+#include "internal/cryptlib.h"
+#include "bn_local.h"
 
 /*
  * Determine the modified width-(w+1) Non-Adjacent Form (wNAF) of 'scalar'.
@@ -67,7 +22,6 @@
 signed char *bn_compute_wNAF(const BIGNUM *scalar, int w, size_t *ret_len)
 {
     int window_val;
-    int ok = 0;
     signed char *r = NULL;
     int sign = 1;
     int bit, next_bit, mask;
@@ -75,7 +29,7 @@ signed char *bn_compute_wNAF(const BIGNUM *scalar, int w, size_t *ret_len)
 
     if (BN_is_zero(scalar)) {
         r = OPENSSL_malloc(1);
-        if (!r) {
+        if (r == NULL) {
             BNerr(BN_F_BN_COMPUTE_WNAF, ERR_R_MALLOC_FAILURE);
             goto err;
         }
@@ -176,27 +130,17 @@ signed char *bn_compute_wNAF(const BIGNUM *scalar, int w, size_t *ret_len)
         BNerr(BN_F_BN_COMPUTE_WNAF, ERR_R_INTERNAL_ERROR);
         goto err;
     }
-    len = j;
-    ok = 1;
+    *ret_len = j;
+    return r;
 
  err:
-    if (!ok) {
-        OPENSSL_free(r);
-        r = NULL;
-    }
-    if (ok)
-        *ret_len = len;
-    return r;
+    OPENSSL_free(r);
+    return NULL;
 }
 
 int bn_get_top(const BIGNUM *a)
 {
     return a->top;
-}
-
-void bn_set_top(BIGNUM *a, int top)
-{
-    a->top = top;
 }
 
 int bn_get_dmax(const BIGNUM *a)
@@ -217,8 +161,9 @@ int bn_copy_words(BN_ULONG *out, const BIGNUM *in, int size)
     if (in->top > size)
         return 0;
 
-    memset(out, 0, sizeof(BN_ULONG) * size);
-    memcpy(out, in->d, sizeof(BN_ULONG) * in->top);
+    memset(out, 0, sizeof(*out) * size);
+    if (in->d != NULL)
+        memcpy(out, in->d, sizeof(*out) * in->top);
     return 1;
 }
 
@@ -227,25 +172,28 @@ BN_ULONG *bn_get_words(const BIGNUM *a)
     return a->d;
 }
 
-void bn_set_static_words(BIGNUM *a, BN_ULONG *words, int size)
+void bn_set_static_words(BIGNUM *a, const BN_ULONG *words, int size)
 {
-    a->d = words;
+    /*
+     * |const| qualifier omission is compensated by BN_FLG_STATIC_DATA
+     * flag, which effectively means "read-only data".
+     */
+    a->d = (BN_ULONG *)words;
     a->dmax = a->top = size;
     a->neg = 0;
     a->flags |= BN_FLG_STATIC_DATA;
+    bn_correct_top(a);
 }
 
-void bn_set_data(BIGNUM *a, const void *data, size_t size)
+int bn_set_words(BIGNUM *a, const BN_ULONG *words, int num_words)
 {
-    memcpy(a->d, data, size);
-}
+    if (bn_wexpand(a, num_words) == NULL) {
+        BNerr(BN_F_BN_SET_WORDS, ERR_R_MALLOC_FAILURE);
+        return 0;
+    }
 
-size_t bn_sizeof_BIGNUM(void)
-{
-    return sizeof(BIGNUM);
-}
-
-BIGNUM *bn_array_el(BIGNUM *base, int el)
-{
-    return &base[el];
+    memcpy(a->d, words, sizeof(BN_ULONG) * num_words);
+    a->top = num_words;
+    bn_correct_top(a);
+    return 1;
 }

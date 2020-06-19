@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2012-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 #
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -19,8 +26,7 @@
 # better, because theoretical [though not necessarily achievable]
 # estimate for "4-bit" table-driven implementation is ~12 cycles.
 
-while (($output=shift) && ($output!~/\w[\w\-]*\.\w+$/)) {}
-open STDOUT,">$output";
+$output = pop and open STDOUT,">$output";
 
 ($Xip,$Htable,$inp,$len)=("A4","B4","A6","B6");	# arguments
 
@@ -153,7 +159,7 @@ ___
 #    8/2                                         S1  L1x S2      |        ....
 #####...                                         ................|............
 $code.=<<___;
-	XORMPY	$H0,$xia,$H0x		; 0	; H·(Xi[i]<<1)
+	XORMPY	$H0,$xia,$H0x		; 0	; HÂ·(Xi[i]<<1)
 ||	XORMPY	$H01u,$xib,$H01y
 || [A0]	LDBU	*--${xip},$x0
 	XORMPY	$H1,$xia,$H1x		; 1
@@ -162,7 +168,7 @@ $code.=<<___;
 	XORMPY	$H3,$xia,$H3x		; 3
 ||	XORMPY	$H3u,$xib,$H3y
 ||[!A0]	MVK.D	15,A0				; *--${xip} counter
-	XOR.L	$H0x,$Z0,$Z0		; 4	; Z^=H·(Xi[i]<<1)
+	XOR.L	$H0x,$Z0,$Z0		; 4	; Z^=HÂ·(Xi[i]<<1)
 || [A0]	SUB.S	A0,1,A0
 	XOR.L	$H1x,$Z1,$Z1		; 5
 ||	AND.D	$H01y,$FF000000,$H0z
@@ -237,4 +243,4 @@ $code.=<<___;
 ___
 
 print $code;
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

@@ -1,9 +1,18 @@
-/* crypto/sha/sha256.c */
-/* ====================================================================
- * Copyright (c) 2004 The OpenSSL Project.  All rights reserved
- * according to the OpenSSL license [found in ../../LICENSE].
- * ====================================================================
+/*
+ * Copyright 2004-2020 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
+
+/*
+ * SHA256 low level APIs are deprecated for public use, but still ok for
+ * internal use.
+ */
+#include "internal/deprecated.h"
+
 #include <openssl/opensslconf.h>
 
 #include <stdlib.h>
@@ -12,8 +21,6 @@
 #include <openssl/crypto.h>
 #include <openssl/sha.h>
 #include <openssl/opensslv.h>
-
-const char SHA256_version[] = "SHA-256" OPENSSL_VERSION_PTEXT;
 
 int SHA224_Init(SHA256_CTX *c)
 {
@@ -56,7 +63,7 @@ unsigned char *SHA224(const unsigned char *d, size_t n, unsigned char *md)
     SHA256_Update(&c, d, n);
     SHA256_Final(md, &c);
     OPENSSL_cleanse(&c, sizeof(c));
-    return (md);
+    return md;
 }
 
 unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md)
@@ -70,7 +77,7 @@ unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md)
     SHA256_Update(&c, d, n);
     SHA256_Final(md, &c);
     OPENSSL_cleanse(&c, sizeof(c));
-    return (md);
+    return md;
 }
 
 int SHA224_Update(SHA256_CTX *c, const void *data, size_t len)
@@ -94,7 +101,7 @@ int SHA224_Final(unsigned char *md, SHA256_CTX *c)
  * default: case below covers for it. It's not clear however if it's
  * permitted to truncate to amount of bytes not divisible by 4. I bet not,
  * but if it is, then default: case shall be extended. For reference.
- * Idea behind separate cases for pre-defined lenghts is to let the
+ * Idea behind separate cases for pre-defined lengths is to let the
  * compiler decide if it's appropriate to unroll small loops.
  */
 #define HASH_MAKE_STRING(c,s)   do {    \
@@ -127,7 +134,7 @@ static
 #endif
 void sha256_block_data_order(SHA256_CTX *ctx, const void *in, size_t num);
 
-#include "md32_common.h"
+#include "crypto/md32_common.h"
 
 #ifndef SHA256_ASM
 static const SHA_LONG K256[64] = {
@@ -184,7 +191,7 @@ static void sha256_block_data_order(SHA256_CTX *ctx, const void *in,
         h = ctx->h[7];
 
         for (i = 0; i < 16; i++) {
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[i] = l;
             T1 += h + Sigma1(e) + Ch(e, f, g) + K256[i];
             T2 = Sigma0(a) + Maj(a, b, c);
@@ -308,52 +315,52 @@ static void sha256_block_data_order(SHA256_CTX *ctx, const void *in,
         } else {
             SHA_LONG l;
 
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[0] = l;
             ROUND_00_15(0, a, b, c, d, e, f, g, h);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[1] = l;
             ROUND_00_15(1, h, a, b, c, d, e, f, g);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[2] = l;
             ROUND_00_15(2, g, h, a, b, c, d, e, f);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[3] = l;
             ROUND_00_15(3, f, g, h, a, b, c, d, e);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[4] = l;
             ROUND_00_15(4, e, f, g, h, a, b, c, d);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[5] = l;
             ROUND_00_15(5, d, e, f, g, h, a, b, c);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[6] = l;
             ROUND_00_15(6, c, d, e, f, g, h, a, b);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[7] = l;
             ROUND_00_15(7, b, c, d, e, f, g, h, a);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[8] = l;
             ROUND_00_15(8, a, b, c, d, e, f, g, h);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[9] = l;
             ROUND_00_15(9, h, a, b, c, d, e, f, g);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[10] = l;
             ROUND_00_15(10, g, h, a, b, c, d, e, f);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[11] = l;
             ROUND_00_15(11, f, g, h, a, b, c, d, e);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[12] = l;
             ROUND_00_15(12, e, f, g, h, a, b, c, d);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[13] = l;
             ROUND_00_15(13, d, e, f, g, h, a, b, c);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[14] = l;
             ROUND_00_15(14, c, d, e, f, g, h, a, b);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[15] = l;
             ROUND_00_15(15, b, c, d, e, f, g, h, a);
         }

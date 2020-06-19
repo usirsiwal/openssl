@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2014-2020 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 #
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -20,36 +27,73 @@
 # CBC encrypt case. On Cortex-A57 parallelizable mode performance
 # seems to be limited by sheer amount of NEON instructions...
 #
+# April 2019
+#
+# Key to performance of parallelize-able modes is round instruction
+# interleaving. But which factor to use? There is optimal one for
+# each combination of instruction latency and issue rate, beyond
+# which increasing interleave factor doesn't pay off. While on cons
+# side we have code size increase and resource waste on platforms for
+# which interleave factor is too high. In other words you want it to
+# be just right. So far interleave factor of 3x was serving well all
+# platforms. But for ThunderX2 optimal interleave factor was measured
+# to be 5x...
+#
 # Performance in cycles per byte processed with 128-bit key:
 #
 #		CBC enc		CBC dec		CTR
 # Apple A7	2.39		1.20		1.20
-# Cortex-A53	2.45		1.87		1.94
-# Cortex-A57	3.64		1.34		1.32
+# Cortex-A53	1.32		1.17/1.29(**)	1.36/1.46
+# Cortex-A57(*)	1.95		0.82/0.85	0.89/0.93
+# Cortex-A72	1.33		0.85/0.88	0.92/0.96
+# Denver	1.96		0.65/0.86	0.76/0.80
+# Mongoose	1.33		1.23/1.20	1.30/1.20
+# Kryo		1.26		0.87/0.94	1.00/1.00
+# ThunderX2	5.95		1.25		1.30
+#
+# (*)	original 3.64/1.34/1.32 results were for r0p0 revision
+#	and are still same even for updated module;
+# (**)	numbers after slash are for 32-bit code, which is 3x-
+#	interleaved;
 
-$flavour = shift;
-$output  = shift;
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+$output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+$flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 ( $xlate="${dir}arm-xlate.pl" and -f $xlate ) or
 ( $xlate="${dir}../../perlasm/arm-xlate.pl" and -f $xlate) or
 die "can't locate arm-xlate.pl";
 
-open OUT,"| \"$^X\" $xlate $flavour $output";
+open OUT,"| \"$^X\" $xlate $flavour \"$output\""
+    or die "can't call $xlate: $!";
 *STDOUT=*OUT;
 
 $prefix="aes_v8";
+
+$_byte = ($flavour =~ /win/ ? "DCB" : ".byte");
 
 $code=<<___;
 #include "arm_arch.h"
 
 #if __ARM_MAX_ARCH__>=7
+___
+$code.=".arch	armv8-a+crypto\n.text\n"		if ($flavour =~ /64/);
+$code.=<<___						if ($flavour !~ /64/);
+.arch	armv7-a	// don't confuse not-so-latest binutils with argv8 :-)
+.fpu	neon
+#ifdef	__thumb2__
+.syntax	unified
+.thumb
+# define INST(a,b,c,d)	$_byte	c,d|0xc,a,b
+#else
+.code	32
+# define INST(a,b,c,d)	$_byte	a,b,c,d
+#endif
+
 .text
 ___
-$code.=".arch	armv8-a+crypto\n"			if ($flavour =~ /64/);
-$code.=".arch	armv7-a\n.fpu	neon\n.code	32\n"	if ($flavour !~ /64/);
-		#^^^^^^ this is done to simplify adoption by not depending
-		#	on latest binutils.
 
 # Assembler mnemonics are an eclectic mix of 32- and 64-bit syntax,
 # NEON is mostly 32-bit mnemonics, integer - mostly 64. Goal is to
@@ -167,7 +211,12 @@ $code.=<<___;
 .Loop192:
 	vtbl.8	$key,{$in1},$mask
 	vext.8	$tmp,$zero,$in0,#12
+#ifdef __ARMEB__
+	vst1.32	{$in1},[$out],#16
+	sub	$out,$out,#8
+#else
 	vst1.32	{$in1},[$out],#8
+#endif
 	aese	$key,$zero
 	subs	$bits,$bits,#1
 
@@ -246,6 +295,7 @@ $code.=<<___;
 ${prefix}_set_decrypt_key:
 ___
 $code.=<<___	if ($flavour =~ /64/);
+	.inst	0xd503233f		// paciasp
 	stp	x29,x30,[sp,#-16]!
 	add	x29,sp,#0
 ___
@@ -289,6 +339,7 @@ $code.=<<___	if ($flavour !~ /64/);
 ___
 $code.=<<___	if ($flavour =~ /64/);
 	ldp	x29,x30,[sp],#16
+	.inst	0xd50323bf		// autiasp
 	ret
 ___
 $code.=<<___;
@@ -316,17 +367,17 @@ ${prefix}_${dir}crypt:
 
 .Loop_${dir}c:
 	aes$e	$inout,$rndkey0
-	vld1.32	{$rndkey0},[$key],#16
 	aes$mc	$inout,$inout
+	vld1.32	{$rndkey0},[$key],#16
 	subs	$rounds,$rounds,#2
 	aes$e	$inout,$rndkey1
-	vld1.32	{$rndkey1},[$key],#16
 	aes$mc	$inout,$inout
+	vld1.32	{$rndkey1},[$key],#16
 	b.gt	.Loop_${dir}c
 
 	aes$e	$inout,$rndkey0
-	vld1.32	{$rndkey0},[$key]
 	aes$mc	$inout,$inout
+	vld1.32	{$rndkey0},[$key]
 	aes$e	$inout,$rndkey1
 	veor	$inout,$inout,$rndkey0
 
@@ -338,12 +389,843 @@ ___
 &gen_block("en");
 &gen_block("de");
 }}}
+
+# Performance in cycles per byte.
+# Processed with AES-ECB different key size.
+# It shows the value before and after optimization as below:
+# (before/after):
+#
+#		AES-128-ECB		AES-192-ECB		AES-256-ECB
+# Cortex-A57	1.85/0.82		2.16/0.96		2.47/1.10
+# Cortex-A72	1.64/0.85		1.82/0.99		2.13/1.14
+
+# Optimization is implemented by loop unrolling and interleaving.
+# Commonly, we choose the unrolling factor as 5, if the input
+# data size smaller than 5 blocks, but not smaller than 3 blocks,
+# choose 3 as the unrolling factor.
+# If the input data size dsize >= 5*16 bytes, then take 5 blocks
+# as one iteration, every loop the left size lsize -= 5*16.
+# If 5*16 > lsize >= 3*16 bytes, take 3 blocks as one iteration,
+# every loop lsize -=3*16.
+# If lsize < 3*16 bytes, treat them as the tail, interleave the
+# two blocks AES instructions.
+# There is one special case, if the original input data size dsize
+# = 16 bytes, we will treat it seperately to improve the
+# performance: one independent code block without LR, FP load and
+# store, just looks like what the original ECB implementation does.
+
+{{{
+my ($inp,$out,$len,$key)=map("x$_",(0..3));
+my ($enc,$rounds,$cnt,$key_,$step)=("w4","w5","w6","x7","x8");
+my ($dat0,$dat1,$in0,$in1,$tmp0,$tmp1,$tmp2,$rndlast)=map("q$_",(0..7));
+
+my ($dat,$tmp,$rndzero_n_last)=($dat0,$tmp0,$tmp1);
+
+### q7	last round key
+### q10-q15	q7 Last 7 round keys
+### q8-q9	preloaded round keys except last 7 keys for big size
+### q5, q6, q8-q9	preloaded round keys except last 7 keys for only 16 byte
+
+{
+my ($dat2,$in2,$tmp2)=map("q$_",(10,11,9));
+
+my ($dat3,$in3,$tmp3);	# used only in 64-bit mode
+my ($dat4,$in4,$tmp4);
+if ($flavour =~ /64/) {
+    ($dat2,$dat3,$dat4,$in2,$in3,$in4,$tmp3,$tmp4)=map("q$_",(16..23));
+}
+
+$code.=<<___;
+.globl	${prefix}_ecb_encrypt
+.type	${prefix}_ecb_encrypt,%function
+.align	5
+${prefix}_ecb_encrypt:
+___
+$code.=<<___	if ($flavour =~ /64/);
+	subs	$len,$len,#16
+	// Original input data size bigger than 16, jump to big size processing.
+	b.ne    .Lecb_big_size
+	vld1.8	{$dat0},[$inp]
+	cmp	$enc,#0					// en- or decrypting?
+	ldr	$rounds,[$key,#240]
+	vld1.32	{q5-q6},[$key],#32			// load key schedule...
+
+	b.eq .Lecb_small_dec
+	aese	$dat0,q5
+	aesmc	$dat0,$dat0
+	vld1.32	{q8-q9},[$key],#32			// load key schedule...
+	aese	$dat0,q6
+	aesmc	$dat0,$dat0
+	subs	$rounds,$rounds,#10			// if rounds==10, jump to aes-128-ecb processing
+	b.eq    .Lecb_128_enc
+.Lecb_round_loop:
+	aese	$dat0,q8
+	aesmc	$dat0,$dat0
+	vld1.32	{q8},[$key],#16				// load key schedule...
+	aese	$dat0,q9
+	aesmc	$dat0,$dat0
+	vld1.32	{q9},[$key],#16				// load key schedule...
+	subs	$rounds,$rounds,#2			// bias
+	b.gt    .Lecb_round_loop
+.Lecb_128_enc:
+	vld1.32	{q10-q11},[$key],#32		// load key schedule...
+	aese	$dat0,q8
+	aesmc	$dat0,$dat0
+	aese	$dat0,q9
+	aesmc	$dat0,$dat0
+	vld1.32	{q12-q13},[$key],#32		// load key schedule...
+	aese	$dat0,q10
+	aesmc	$dat0,$dat0
+	aese	$dat0,q11
+	aesmc	$dat0,$dat0
+	vld1.32	{q14-q15},[$key],#32		// load key schedule...
+	aese	$dat0,q12
+	aesmc	$dat0,$dat0
+	aese	$dat0,q13
+	aesmc	$dat0,$dat0
+	vld1.32	{$rndlast},[$key]
+	aese	$dat0,q14
+	aesmc	$dat0,$dat0
+	aese	$dat0,q15
+	veor	$dat0,$dat0,$rndlast
+	vst1.8	{$dat0},[$out]
+	b	.Lecb_Final_abort
+.Lecb_small_dec:
+	aesd	$dat0,q5
+	aesimc	$dat0,$dat0
+	vld1.32	{q8-q9},[$key],#32			// load key schedule...
+	aesd	$dat0,q6
+	aesimc	$dat0,$dat0
+	subs	$rounds,$rounds,#10			// bias
+	b.eq    .Lecb_128_dec
+.Lecb_dec_round_loop:
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	vld1.32	{q8},[$key],#16				// load key schedule...
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	vld1.32	{q9},[$key],#16				// load key schedule...
+	subs	$rounds,$rounds,#2			// bias
+	b.gt    .Lecb_dec_round_loop
+.Lecb_128_dec:
+	vld1.32	{q10-q11},[$key],#32		// load key schedule...
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	vld1.32	{q12-q13},[$key],#32		// load key schedule...
+	aesd	$dat0,q10
+	aesimc	$dat0,$dat0
+	aesd	$dat0,q11
+	aesimc	$dat0,$dat0
+	vld1.32	{q14-q15},[$key],#32		// load key schedule...
+	aesd	$dat0,q12
+	aesimc	$dat0,$dat0
+	aesd	$dat0,q13
+	aesimc	$dat0,$dat0
+	vld1.32	{$rndlast},[$key]
+	aesd	$dat0,q14
+	aesimc	$dat0,$dat0
+	aesd	$dat0,q15
+	veor	$dat0,$dat0,$rndlast
+	vst1.8	{$dat0},[$out]
+	b	.Lecb_Final_abort
+.Lecb_big_size:
+___
+$code.=<<___	if ($flavour =~ /64/);
+	stp	x29,x30,[sp,#-16]!
+	add	x29,sp,#0
+___
+$code.=<<___	if ($flavour !~ /64/);
+	mov	ip,sp
+	stmdb	sp!,{r4-r8,lr}
+	vstmdb	sp!,{d8-d15}			@ ABI specification says so
+	ldmia	ip,{r4-r5}			@ load remaining args
+	subs	$len,$len,#16
+___
+$code.=<<___;
+	mov	$step,#16
+	b.lo	.Lecb_done
+	cclr	$step,eq
+
+	cmp	$enc,#0					// en- or decrypting?
+	ldr	$rounds,[$key,#240]
+	and	$len,$len,#-16
+	vld1.8	{$dat},[$inp],$step
+
+	vld1.32	{q8-q9},[$key]				// load key schedule...
+	sub	$rounds,$rounds,#6
+	add	$key_,$key,x5,lsl#4				// pointer to last 7 round keys
+	sub	$rounds,$rounds,#2
+	vld1.32	{q10-q11},[$key_],#32
+	vld1.32	{q12-q13},[$key_],#32
+	vld1.32	{q14-q15},[$key_],#32
+	vld1.32	{$rndlast},[$key_]
+
+	add	$key_,$key,#32
+	mov	$cnt,$rounds
+	b.eq	.Lecb_dec
+
+	vld1.8	{$dat1},[$inp],#16
+	subs	$len,$len,#32				// bias
+	add	$cnt,$rounds,#2
+	vorr	$in1,$dat1,$dat1
+	vorr	$dat2,$dat1,$dat1
+	vorr	$dat1,$dat,$dat
+	b.lo	.Lecb_enc_tail
+
+	vorr	$dat1,$in1,$in1
+	vld1.8	{$dat2},[$inp],#16
+___
+$code.=<<___	if ($flavour =~ /64/);
+	cmp	$len,#32
+	b.lo	.Loop3x_ecb_enc
+
+	vld1.8	{$dat3},[$inp],#16
+	vld1.8	{$dat4},[$inp],#16
+	sub	$len,$len,#32				// bias
+	mov	$cnt,$rounds
+
+.Loop5x_ecb_enc:
+	aese	$dat0,q8
+	aesmc	$dat0,$dat0
+	aese	$dat1,q8
+	aesmc	$dat1,$dat1
+	aese	$dat2,q8
+	aesmc	$dat2,$dat2
+	aese	$dat3,q8
+	aesmc	$dat3,$dat3
+	aese	$dat4,q8
+	aesmc	$dat4,$dat4
+	vld1.32	{q8},[$key_],#16
+	subs	$cnt,$cnt,#2
+	aese	$dat0,q9
+	aesmc	$dat0,$dat0
+	aese	$dat1,q9
+	aesmc	$dat1,$dat1
+	aese	$dat2,q9
+	aesmc	$dat2,$dat2
+	aese	$dat3,q9
+	aesmc	$dat3,$dat3
+	aese	$dat4,q9
+	aesmc	$dat4,$dat4
+	vld1.32	{q9},[$key_],#16
+	b.gt	.Loop5x_ecb_enc
+
+	aese	$dat0,q8
+	aesmc	$dat0,$dat0
+	aese	$dat1,q8
+	aesmc	$dat1,$dat1
+	aese	$dat2,q8
+	aesmc	$dat2,$dat2
+	aese	$dat3,q8
+	aesmc	$dat3,$dat3
+	aese	$dat4,q8
+	aesmc	$dat4,$dat4
+	cmp	$len,#0x40					// because .Lecb_enc_tail4x
+	sub	$len,$len,#0x50
+
+	aese	$dat0,q9
+	aesmc	$dat0,$dat0
+	aese	$dat1,q9
+	aesmc	$dat1,$dat1
+	aese	$dat2,q9
+	aesmc	$dat2,$dat2
+	aese	$dat3,q9
+	aesmc	$dat3,$dat3
+	aese	$dat4,q9
+	aesmc	$dat4,$dat4
+	csel	x6,xzr,$len,gt			// borrow x6, $cnt, "gt" is not typo
+	mov	$key_,$key
+
+	aese	$dat0,q10
+	aesmc	$dat0,$dat0
+	aese	$dat1,q10
+	aesmc	$dat1,$dat1
+	aese	$dat2,q10
+	aesmc	$dat2,$dat2
+	aese	$dat3,q10
+	aesmc	$dat3,$dat3
+	aese	$dat4,q10
+	aesmc	$dat4,$dat4
+	add	$inp,$inp,x6				// $inp is adjusted in such way that
+							// at exit from the loop $dat1-$dat4
+							// are loaded with last "words"
+	add	x6,$len,#0x60		    // because .Lecb_enc_tail4x
+
+	aese	$dat0,q11
+	aesmc	$dat0,$dat0
+	aese	$dat1,q11
+	aesmc	$dat1,$dat1
+	aese	$dat2,q11
+	aesmc	$dat2,$dat2
+	aese	$dat3,q11
+	aesmc	$dat3,$dat3
+	aese	$dat4,q11
+	aesmc	$dat4,$dat4
+
+	aese	$dat0,q12
+	aesmc	$dat0,$dat0
+	aese	$dat1,q12
+	aesmc	$dat1,$dat1
+	aese	$dat2,q12
+	aesmc	$dat2,$dat2
+	aese	$dat3,q12
+	aesmc	$dat3,$dat3
+	aese	$dat4,q12
+	aesmc	$dat4,$dat4
+
+	aese	$dat0,q13
+	aesmc	$dat0,$dat0
+	aese	$dat1,q13
+	aesmc	$dat1,$dat1
+	aese	$dat2,q13
+	aesmc	$dat2,$dat2
+	aese	$dat3,q13
+	aesmc	$dat3,$dat3
+	aese	$dat4,q13
+	aesmc	$dat4,$dat4
+
+	aese	$dat0,q14
+	aesmc	$dat0,$dat0
+	aese	$dat1,q14
+	aesmc	$dat1,$dat1
+	aese	$dat2,q14
+	aesmc	$dat2,$dat2
+	aese	$dat3,q14
+	aesmc	$dat3,$dat3
+	aese	$dat4,q14
+	aesmc	$dat4,$dat4
+
+	aese	$dat0,q15
+	vld1.8	{$in0},[$inp],#16
+	aese	$dat1,q15
+	vld1.8	{$in1},[$inp],#16
+	aese	$dat2,q15
+	vld1.8	{$in2},[$inp],#16
+	aese	$dat3,q15
+	vld1.8	{$in3},[$inp],#16
+	aese	$dat4,q15
+	vld1.8	{$in4},[$inp],#16
+	cbz	x6,.Lecb_enc_tail4x
+	vld1.32 {q8},[$key_],#16			// re-pre-load rndkey[0]
+	veor	$tmp0,$rndlast,$dat0
+	vorr	$dat0,$in0,$in0
+	veor	$tmp1,$rndlast,$dat1
+	vorr	$dat1,$in1,$in1
+	veor	$tmp2,$rndlast,$dat2
+	vorr	$dat2,$in2,$in2
+	veor	$tmp3,$rndlast,$dat3
+	vorr	$dat3,$in3,$in3
+	veor	$tmp4,$rndlast,$dat4
+	vst1.8	{$tmp0},[$out],#16
+	vorr	$dat4,$in4,$in4
+	vst1.8	{$tmp1},[$out],#16
+	mov	$cnt,$rounds
+	vst1.8	{$tmp2},[$out],#16
+	vld1.32 {q9},[$key_],#16			// re-pre-load rndkey[1]
+	vst1.8	{$tmp3},[$out],#16
+	vst1.8	{$tmp4},[$out],#16
+	b.hs	.Loop5x_ecb_enc
+
+	add	$len,$len,#0x50
+	cbz	$len,.Lecb_done
+
+	add	$cnt,$rounds,#2
+	subs	$len,$len,#0x30
+	vorr	$dat0,$in2,$in2
+	vorr	$dat1,$in3,$in3
+	vorr	$dat2,$in4,$in4
+	b.lo	.Lecb_enc_tail
+
+	b	.Loop3x_ecb_enc
+
+.align	4
+.Lecb_enc_tail4x:
+	veor	$tmp1,$rndlast,$dat1
+	veor	$tmp2,$rndlast,$dat2
+	veor	$tmp3,$rndlast,$dat3
+	veor	$tmp4,$rndlast,$dat4
+	vst1.8	{$tmp1},[$out],#16
+	vst1.8	{$tmp2},[$out],#16
+	vst1.8	{$tmp3},[$out],#16
+	vst1.8	{$tmp4},[$out],#16
+
+	b	.Lecb_done
+.align	4
+___
+$code.=<<___;
+.Loop3x_ecb_enc:
+	aese	$dat0,q8
+	aesmc	$dat0,$dat0
+	aese	$dat1,q8
+	aesmc	$dat1,$dat1
+	aese	$dat2,q8
+	aesmc	$dat2,$dat2
+	vld1.32	{q8},[$key_],#16
+	subs	$cnt,$cnt,#2
+	aese	$dat0,q9
+	aesmc	$dat0,$dat0
+	aese	$dat1,q9
+	aesmc	$dat1,$dat1
+	aese	$dat2,q9
+	aesmc	$dat2,$dat2
+	vld1.32	{q9},[$key_],#16
+	b.gt	.Loop3x_ecb_enc
+
+	aese	$dat0,q8
+	aesmc	$dat0,$dat0
+	aese	$dat1,q8
+	aesmc	$dat1,$dat1
+	aese	$dat2,q8
+	aesmc	$dat2,$dat2
+	subs	$len,$len,#0x30
+	mov.lo	x6,$len				// x6, $cnt, is zero at this point
+	aese	$dat0,q9
+	aesmc	$dat0,$dat0
+	aese	$dat1,q9
+	aesmc	$dat1,$dat1
+	aese	$dat2,q9
+	aesmc	$dat2,$dat2
+	add	$inp,$inp,x6			// $inp is adjusted in such way that
+						// at exit from the loop $dat1-$dat2
+						// are loaded with last "words"
+	mov	$key_,$key
+	aese	$dat0,q12
+	aesmc	$dat0,$dat0
+	aese	$dat1,q12
+	aesmc	$dat1,$dat1
+	aese	$dat2,q12
+	aesmc	$dat2,$dat2
+	vld1.8	{$in0},[$inp],#16
+	aese	$dat0,q13
+	aesmc	$dat0,$dat0
+	aese	$dat1,q13
+	aesmc	$dat1,$dat1
+	aese	$dat2,q13
+	aesmc	$dat2,$dat2
+	vld1.8	{$in1},[$inp],#16
+	aese	$dat0,q14
+	aesmc	$dat0,$dat0
+	aese	$dat1,q14
+	aesmc	$dat1,$dat1
+	aese	$dat2,q14
+	aesmc	$dat2,$dat2
+	vld1.8	{$in2},[$inp],#16
+	aese	$dat0,q15
+	aese	$dat1,q15
+	aese	$dat2,q15
+	vld1.32 {q8},[$key_],#16		// re-pre-load rndkey[0]
+	add	$cnt,$rounds,#2
+	veor	$tmp0,$rndlast,$dat0
+	veor	$tmp1,$rndlast,$dat1
+	veor	$dat2,$dat2,$rndlast
+	vld1.32 {q9},[$key_],#16		// re-pre-load rndkey[1]
+	vst1.8	{$tmp0},[$out],#16
+	vorr	$dat0,$in0,$in0
+	vst1.8	{$tmp1},[$out],#16
+	vorr	$dat1,$in1,$in1
+	vst1.8	{$dat2},[$out],#16
+	vorr	$dat2,$in2,$in2
+	b.hs	.Loop3x_ecb_enc
+
+	cmn	$len,#0x30
+	b.eq	.Lecb_done
+	nop
+
+.Lecb_enc_tail:
+	aese	$dat1,q8
+	aesmc	$dat1,$dat1
+	aese	$dat2,q8
+	aesmc	$dat2,$dat2
+	vld1.32	{q8},[$key_],#16
+	subs	$cnt,$cnt,#2
+	aese	$dat1,q9
+	aesmc	$dat1,$dat1
+	aese	$dat2,q9
+	aesmc	$dat2,$dat2
+	vld1.32	{q9},[$key_],#16
+	b.gt	.Lecb_enc_tail
+
+	aese	$dat1,q8
+	aesmc	$dat1,$dat1
+	aese	$dat2,q8
+	aesmc	$dat2,$dat2
+	aese	$dat1,q9
+	aesmc	$dat1,$dat1
+	aese	$dat2,q9
+	aesmc	$dat2,$dat2
+	aese	$dat1,q12
+	aesmc	$dat1,$dat1
+	aese	$dat2,q12
+	aesmc	$dat2,$dat2
+	cmn	$len,#0x20
+	aese	$dat1,q13
+	aesmc	$dat1,$dat1
+	aese	$dat2,q13
+	aesmc	$dat2,$dat2
+	aese	$dat1,q14
+	aesmc	$dat1,$dat1
+	aese	$dat2,q14
+	aesmc	$dat2,$dat2
+	aese	$dat1,q15
+	aese	$dat2,q15
+	b.eq	.Lecb_enc_one
+	veor	$tmp1,$rndlast,$dat1
+	veor	$tmp2,$rndlast,$dat2
+	vst1.8	{$tmp1},[$out],#16
+	vst1.8	{$tmp2},[$out],#16
+	b	.Lecb_done
+
+.Lecb_enc_one:
+	veor	$tmp1,$rndlast,$dat2
+	vst1.8	{$tmp1},[$out],#16
+	b	.Lecb_done
+___
+
+$code.=<<___;
+.align	5
+.Lecb_dec:
+	vld1.8	{$dat1},[$inp],#16
+	subs	$len,$len,#32			// bias
+	add	$cnt,$rounds,#2
+	vorr	$in1,$dat1,$dat1
+	vorr	$dat2,$dat1,$dat1
+	vorr	$dat1,$dat,$dat
+	b.lo	.Lecb_dec_tail
+
+	vorr	$dat1,$in1,$in1
+	vld1.8	{$dat2},[$inp],#16
+___
+$code.=<<___	if ($flavour =~ /64/);
+	cmp	$len,#32
+	b.lo	.Loop3x_ecb_dec
+
+	vld1.8	{$dat3},[$inp],#16
+	vld1.8	{$dat4},[$inp],#16
+	sub	$len,$len,#32				// bias
+	mov	$cnt,$rounds
+
+.Loop5x_ecb_dec:
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q8
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q8
+	aesimc	$dat4,$dat4
+	vld1.32	{q8},[$key_],#16
+	subs	$cnt,$cnt,#2
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q9
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q9
+	aesimc	$dat4,$dat4
+	vld1.32	{q9},[$key_],#16
+	b.gt	.Loop5x_ecb_dec
+
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q8
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q8
+	aesimc	$dat4,$dat4
+	cmp	$len,#0x40				// because .Lecb_tail4x
+	sub	$len,$len,#0x50
+
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q9
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q9
+	aesimc	$dat4,$dat4
+	csel	x6,xzr,$len,gt		// borrow x6, $cnt, "gt" is not typo
+	mov	$key_,$key
+
+	aesd	$dat0,q10
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q10
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q10
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q10
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q10
+	aesimc	$dat4,$dat4
+	add	$inp,$inp,x6				// $inp is adjusted in such way that
+							// at exit from the loop $dat1-$dat4
+							// are loaded with last "words"
+	add	x6,$len,#0x60			// because .Lecb_tail4x
+
+	aesd	$dat0,q11
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q11
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q11
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q11
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q11
+	aesimc	$dat4,$dat4
+
+	aesd	$dat0,q12
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q12
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q12
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q12
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q12
+	aesimc	$dat4,$dat4
+
+	aesd	$dat0,q13
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q13
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q13
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q13
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q13
+	aesimc	$dat4,$dat4
+
+	aesd	$dat0,q14
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q14
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q14
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q14
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q14
+	aesimc	$dat4,$dat4
+
+	aesd	$dat0,q15
+	vld1.8	{$in0},[$inp],#16
+	aesd	$dat1,q15
+	vld1.8	{$in1},[$inp],#16
+	aesd	$dat2,q15
+	vld1.8	{$in2},[$inp],#16
+	aesd	$dat3,q15
+	vld1.8	{$in3},[$inp],#16
+	aesd	$dat4,q15
+	vld1.8	{$in4},[$inp],#16
+	cbz	x6,.Lecb_tail4x
+	vld1.32 {q8},[$key_],#16			// re-pre-load rndkey[0]
+	veor	$tmp0,$rndlast,$dat0
+	vorr	$dat0,$in0,$in0
+	veor	$tmp1,$rndlast,$dat1
+	vorr	$dat1,$in1,$in1
+	veor	$tmp2,$rndlast,$dat2
+	vorr	$dat2,$in2,$in2
+	veor	$tmp3,$rndlast,$dat3
+	vorr	$dat3,$in3,$in3
+	veor	$tmp4,$rndlast,$dat4
+	vst1.8	{$tmp0},[$out],#16
+	vorr	$dat4,$in4,$in4
+	vst1.8	{$tmp1},[$out],#16
+	mov	$cnt,$rounds
+	vst1.8	{$tmp2},[$out],#16
+	vld1.32 {q9},[$key_],#16			// re-pre-load rndkey[1]
+	vst1.8	{$tmp3},[$out],#16
+	vst1.8	{$tmp4},[$out],#16
+	b.hs	.Loop5x_ecb_dec
+
+	add	$len,$len,#0x50
+	cbz	$len,.Lecb_done
+
+	add	$cnt,$rounds,#2
+	subs	$len,$len,#0x30
+	vorr	$dat0,$in2,$in2
+	vorr	$dat1,$in3,$in3
+	vorr	$dat2,$in4,$in4
+	b.lo	.Lecb_dec_tail
+
+	b	.Loop3x_ecb_dec
+
+.align	4
+.Lecb_tail4x:
+	veor	$tmp1,$rndlast,$dat1
+	veor	$tmp2,$rndlast,$dat2
+	veor	$tmp3,$rndlast,$dat3
+	veor	$tmp4,$rndlast,$dat4
+	vst1.8	{$tmp1},[$out],#16
+	vst1.8	{$tmp2},[$out],#16
+	vst1.8	{$tmp3},[$out],#16
+	vst1.8	{$tmp4},[$out],#16
+
+	b	.Lecb_done
+.align	4
+___
+$code.=<<___;
+.Loop3x_ecb_dec:
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	vld1.32	{q8},[$key_],#16
+	subs	$cnt,$cnt,#2
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	vld1.32	{q9},[$key_],#16
+	b.gt	.Loop3x_ecb_dec
+
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	subs	$len,$len,#0x30
+	mov.lo	x6,$len				// x6, $cnt, is zero at this point
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	add	$inp,$inp,x6 			// $inp is adjusted in such way that
+						// at exit from the loop $dat1-$dat2
+						// are loaded with last "words"
+	mov	$key_,$key
+	aesd	$dat0,q12
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q12
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q12
+	aesimc	$dat2,$dat2
+	vld1.8	{$in0},[$inp],#16
+	aesd	$dat0,q13
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q13
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q13
+	aesimc	$dat2,$dat2
+	vld1.8	{$in1},[$inp],#16
+	aesd	$dat0,q14
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q14
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q14
+	aesimc	$dat2,$dat2
+	vld1.8	{$in2},[$inp],#16
+	aesd	$dat0,q15
+	aesd	$dat1,q15
+	aesd	$dat2,q15
+	vld1.32 {q8},[$key_],#16			// re-pre-load rndkey[0]
+	add	$cnt,$rounds,#2
+	veor	$tmp0,$rndlast,$dat0
+	veor	$tmp1,$rndlast,$dat1
+	veor	$dat2,$dat2,$rndlast
+	vld1.32 {q9},[$key_],#16			// re-pre-load rndkey[1]
+	vst1.8	{$tmp0},[$out],#16
+	vorr	$dat0,$in0,$in0
+	vst1.8	{$tmp1},[$out],#16
+	vorr	$dat1,$in1,$in1
+	vst1.8	{$dat2},[$out],#16
+	vorr	$dat2,$in2,$in2
+	b.hs	.Loop3x_ecb_dec
+
+	cmn	$len,#0x30
+	b.eq	.Lecb_done
+	nop
+
+.Lecb_dec_tail:
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	vld1.32	{q8},[$key_],#16
+	subs	$cnt,$cnt,#2
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	vld1.32	{q9},[$key_],#16
+	b.gt	.Lecb_dec_tail
+
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	aesd	$dat1,q12
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q12
+	aesimc	$dat2,$dat2
+	cmn	$len,#0x20
+	aesd	$dat1,q13
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q13
+	aesimc	$dat2,$dat2
+	aesd	$dat1,q14
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q14
+	aesimc	$dat2,$dat2
+	aesd	$dat1,q15
+	aesd	$dat2,q15
+	b.eq	.Lecb_dec_one
+	veor	$tmp1,$rndlast,$dat1
+	veor	$tmp2,$rndlast,$dat2
+	vst1.8	{$tmp1},[$out],#16
+	vst1.8	{$tmp2},[$out],#16
+	b	.Lecb_done
+
+.Lecb_dec_one:
+	veor	$tmp1,$rndlast,$dat2
+	vst1.8	{$tmp1},[$out],#16
+
+.Lecb_done:
+___
+}
+$code.=<<___	if ($flavour !~ /64/);
+	vldmia	sp!,{d8-d15}
+	ldmia	sp!,{r4-r8,pc}
+___
+$code.=<<___	if ($flavour =~ /64/);
+	ldr	x29,[sp],#16
+___
+$code.=<<___	if ($flavour =~ /64/);
+.Lecb_Final_abort:
+	ret
+___
+$code.=<<___;
+.size	${prefix}_ecb_encrypt,.-${prefix}_ecb_encrypt
+___
+}}}
 {{{
 my ($inp,$out,$len,$key,$ivp)=map("x$_",(0..4)); my $enc="w5";
 my ($rounds,$cnt,$key_,$step,$step1)=($enc,"w6","x7","x8","x12");
 my ($dat0,$dat1,$in0,$in1,$tmp0,$tmp1,$ivec,$rndlast)=map("q$_",(0..7));
 
 my ($dat,$tmp,$rndzero_n_last)=($dat0,$tmp0,$tmp1);
+my ($key4,$key5,$key6,$key7)=("x6","x12","x14",$key);
 
 ### q8-q15	preloaded key schedule
 
@@ -393,16 +1275,42 @@ $code.=<<___;
 	veor	$rndzero_n_last,q8,$rndlast
 	b.eq	.Lcbc_enc128
 
+	vld1.32	{$in0-$in1},[$key_]
+	add	$key_,$key,#16
+	add	$key4,$key,#16*4
+	add	$key5,$key,#16*5
+	aese	$dat,q8
+	aesmc	$dat,$dat
+	add	$key6,$key,#16*6
+	add	$key7,$key,#16*7
+	b	.Lenter_cbc_enc
+
+.align	4
 .Loop_cbc_enc:
 	aese	$dat,q8
-	vld1.32	{q8},[$key_],#16
 	aesmc	$dat,$dat
-	subs	$cnt,$cnt,#2
+	 vst1.8	{$ivec},[$out],#16
+.Lenter_cbc_enc:
 	aese	$dat,q9
-	vld1.32	{q9},[$key_],#16
 	aesmc	$dat,$dat
-	b.gt	.Loop_cbc_enc
+	aese	$dat,$in0
+	aesmc	$dat,$dat
+	vld1.32	{q8},[$key4]
+	cmp	$rounds,#4
+	aese	$dat,$in1
+	aesmc	$dat,$dat
+	vld1.32	{q9},[$key5]
+	b.eq	.Lcbc_enc192
 
+	aese	$dat,q8
+	aesmc	$dat,$dat
+	vld1.32	{q8},[$key6]
+	aese	$dat,q9
+	aesmc	$dat,$dat
+	vld1.32	{q9},[$key7]
+	nop
+
+.Lcbc_enc192:
 	aese	$dat,q8
 	aesmc	$dat,$dat
 	 subs	$len,$len,#16
@@ -411,7 +1319,6 @@ $code.=<<___;
 	 cclr	$step,eq
 	aese	$dat,q10
 	aesmc	$dat,$dat
-	 add	$key_,$key,#16
 	aese	$dat,q11
 	aesmc	$dat,$dat
 	 vld1.8	{q8},[$inp],$step
@@ -420,16 +1327,14 @@ $code.=<<___;
 	 veor	q8,q8,$rndzero_n_last
 	aese	$dat,q13
 	aesmc	$dat,$dat
-	 vld1.32 {q9},[$key_],#16	// re-pre-load rndkey[1]
+	 vld1.32 {q9},[$key_]		// re-pre-load rndkey[1]
 	aese	$dat,q14
 	aesmc	$dat,$dat
 	aese	$dat,q15
-
-	 mov	$cnt,$rounds
 	veor	$ivec,$dat,$rndlast
-	vst1.8	{$ivec},[$out],#16
 	b.hs	.Loop_cbc_enc
 
+	vst1.8	{$ivec},[$out],#16
 	b	.Lcbc_done
 
 .align	5
@@ -472,6 +1377,13 @@ $code.=<<___;
 ___
 {
 my ($dat2,$in2,$tmp2)=map("q$_",(10,11,9));
+
+my ($dat3,$in3,$tmp3);	# used only in 64-bit mode
+my ($dat4,$in4,$tmp4);
+if ($flavour =~ /64/) {
+    ($dat2,$dat3,$dat4,$in2,$in3,$in4,$tmp3,$tmp4)=map("q$_",(16..23));
+}
+
 $code.=<<___;
 .align	5
 .Lcbc_dec:
@@ -488,82 +1400,270 @@ $code.=<<___;
 	vorr	$in0,$dat,$dat
 	vorr	$in1,$dat1,$dat1
 	vorr	$in2,$dat2,$dat2
+___
+$code.=<<___	if ($flavour =~ /64/);
+	cmp	$len,#32
+	b.lo	.Loop3x_cbc_dec
 
-.Loop3x_cbc_dec:
+	vld1.8	{$dat3},[$inp],#16
+	vld1.8	{$dat4},[$inp],#16
+	sub	$len,$len,#32		// bias
+	mov	$cnt,$rounds
+	vorr	$in3,$dat3,$dat3
+	vorr	$in4,$dat4,$dat4
+
+.Loop5x_cbc_dec:
 	aesd	$dat0,q8
-	aesd	$dat1,q8
-	aesd	$dat2,q8
-	vld1.32	{q8},[$key_],#16
 	aesimc	$dat0,$dat0
+	aesd	$dat1,q8
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
 	aesimc	$dat2,$dat2
+	aesd	$dat3,q8
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q8
+	aesimc	$dat4,$dat4
+	vld1.32	{q8},[$key_],#16
 	subs	$cnt,$cnt,#2
 	aesd	$dat0,q9
-	aesd	$dat1,q9
-	aesd	$dat2,q9
-	vld1.32	{q9},[$key_],#16
 	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
 	aesimc	$dat2,$dat2
+	aesd	$dat3,q9
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q9
+	aesimc	$dat4,$dat4
+	vld1.32	{q9},[$key_],#16
+	b.gt	.Loop5x_cbc_dec
+
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q8
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q8
+	aesimc	$dat4,$dat4
+	 cmp	$len,#0x40		// because .Lcbc_tail4x
+	 sub	$len,$len,#0x50
+
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q9
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q9
+	aesimc	$dat4,$dat4
+	 csel	x6,xzr,$len,gt		// borrow x6, $cnt, "gt" is not typo
+	 mov	$key_,$key
+
+	aesd	$dat0,q10
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q10
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q10
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q10
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q10
+	aesimc	$dat4,$dat4
+	 add	$inp,$inp,x6		// $inp is adjusted in such way that
+					// at exit from the loop $dat1-$dat4
+					// are loaded with last "words"
+	 add	x6,$len,#0x60		// because .Lcbc_tail4x
+
+	aesd	$dat0,q11
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q11
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q11
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q11
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q11
+	aesimc	$dat4,$dat4
+
+	aesd	$dat0,q12
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q12
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q12
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q12
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q12
+	aesimc	$dat4,$dat4
+
+	aesd	$dat0,q13
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q13
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q13
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q13
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q13
+	aesimc	$dat4,$dat4
+
+	aesd	$dat0,q14
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q14
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q14
+	aesimc	$dat2,$dat2
+	aesd	$dat3,q14
+	aesimc	$dat3,$dat3
+	aesd	$dat4,q14
+	aesimc	$dat4,$dat4
+
+	 veor	$tmp0,$ivec,$rndlast
+	aesd	$dat0,q15
+	 veor	$tmp1,$in0,$rndlast
+	 vld1.8	{$in0},[$inp],#16
+	aesd	$dat1,q15
+	 veor	$tmp2,$in1,$rndlast
+	 vld1.8	{$in1},[$inp],#16
+	aesd	$dat2,q15
+	 veor	$tmp3,$in2,$rndlast
+	 vld1.8	{$in2},[$inp],#16
+	aesd	$dat3,q15
+	 veor	$tmp4,$in3,$rndlast
+	 vld1.8	{$in3},[$inp],#16
+	aesd	$dat4,q15
+	 vorr	$ivec,$in4,$in4
+	 vld1.8	{$in4},[$inp],#16
+	cbz	x6,.Lcbc_tail4x
+	 vld1.32 {q8},[$key_],#16	// re-pre-load rndkey[0]
+	veor	$tmp0,$tmp0,$dat0
+	 vorr	$dat0,$in0,$in0
+	veor	$tmp1,$tmp1,$dat1
+	 vorr	$dat1,$in1,$in1
+	veor	$tmp2,$tmp2,$dat2
+	 vorr	$dat2,$in2,$in2
+	veor	$tmp3,$tmp3,$dat3
+	 vorr	$dat3,$in3,$in3
+	veor	$tmp4,$tmp4,$dat4
+	vst1.8	{$tmp0},[$out],#16
+	 vorr	$dat4,$in4,$in4
+	vst1.8	{$tmp1},[$out],#16
+	 mov	$cnt,$rounds
+	vst1.8	{$tmp2},[$out],#16
+	 vld1.32 {q9},[$key_],#16	// re-pre-load rndkey[1]
+	vst1.8	{$tmp3},[$out],#16
+	vst1.8	{$tmp4},[$out],#16
+	b.hs	.Loop5x_cbc_dec
+
+	add	$len,$len,#0x50
+	cbz	$len,.Lcbc_done
+
+	add	$cnt,$rounds,#2
+	subs	$len,$len,#0x30
+	vorr	$dat0,$in2,$in2
+	vorr	$in0,$in2,$in2
+	vorr	$dat1,$in3,$in3
+	vorr	$in1,$in3,$in3
+	vorr	$dat2,$in4,$in4
+	vorr	$in2,$in4,$in4
+	b.lo	.Lcbc_dec_tail
+
+	b	.Loop3x_cbc_dec
+
+.align	4
+.Lcbc_tail4x:
+	veor	$tmp1,$tmp0,$dat1
+	veor	$tmp2,$tmp2,$dat2
+	veor	$tmp3,$tmp3,$dat3
+	veor	$tmp4,$tmp4,$dat4
+	vst1.8	{$tmp1},[$out],#16
+	vst1.8	{$tmp2},[$out],#16
+	vst1.8	{$tmp3},[$out],#16
+	vst1.8	{$tmp4},[$out],#16
+
+	b	.Lcbc_done
+.align	4
+___
+$code.=<<___;
+.Loop3x_cbc_dec:
+	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
+	vld1.32	{q8},[$key_],#16
+	subs	$cnt,$cnt,#2
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	vld1.32	{q9},[$key_],#16
 	b.gt	.Loop3x_cbc_dec
 
 	aesd	$dat0,q8
+	aesimc	$dat0,$dat0
 	aesd	$dat1,q8
+	aesimc	$dat1,$dat1
 	aesd	$dat2,q8
+	aesimc	$dat2,$dat2
 	 veor	$tmp0,$ivec,$rndlast
-	aesimc	$dat0,$dat0
-	aesimc	$dat1,$dat1
-	aesimc	$dat2,$dat2
-	 veor	$tmp1,$in0,$rndlast
-	aesd	$dat0,q9
-	aesd	$dat1,q9
-	aesd	$dat2,q9
-	 veor	$tmp2,$in1,$rndlast
 	 subs	$len,$len,#0x30
-	aesimc	$dat0,$dat0
-	aesimc	$dat1,$dat1
-	aesimc	$dat2,$dat2
-	 vorr	$ivec,$in2,$in2
+	 veor	$tmp1,$in0,$rndlast
 	 mov.lo	x6,$len			// x6, $cnt, is zero at this point
-	aesd	$dat0,q12
-	aesd	$dat1,q12
-	aesd	$dat2,q12
+	aesd	$dat0,q9
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q9
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
+	aesimc	$dat2,$dat2
+	 veor	$tmp2,$in1,$rndlast
 	 add	$inp,$inp,x6		// $inp is adjusted in such way that
 					// at exit from the loop $dat1-$dat2
 					// are loaded with last "words"
-	aesimc	$dat0,$dat0
-	aesimc	$dat1,$dat1
-	aesimc	$dat2,$dat2
+	 vorr	$ivec,$in2,$in2
 	 mov	$key_,$key
-	aesd	$dat0,q13
-	aesd	$dat1,q13
-	aesd	$dat2,q13
-	 vld1.8	{$in0},[$inp],#16
+	aesd	$dat0,q12
 	aesimc	$dat0,$dat0
+	aesd	$dat1,q12
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q12
+	aesimc	$dat2,$dat2
+	 vld1.8	{$in0},[$inp],#16
+	aesd	$dat0,q13
+	aesimc	$dat0,$dat0
+	aesd	$dat1,q13
+	aesimc	$dat1,$dat1
+	aesd	$dat2,q13
 	aesimc	$dat2,$dat2
 	 vld1.8	{$in1},[$inp],#16
 	aesd	$dat0,q14
-	aesd	$dat1,q14
-	aesd	$dat2,q14
-	 vld1.8	{$in2},[$inp],#16
 	aesimc	$dat0,$dat0
+	aesd	$dat1,q14
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q14
 	aesimc	$dat2,$dat2
-	 vld1.32 {q8},[$key_],#16	// re-pre-load rndkey[0]
+	 vld1.8	{$in2},[$inp],#16
 	aesd	$dat0,q15
 	aesd	$dat1,q15
 	aesd	$dat2,q15
-
+	 vld1.32 {q8},[$key_],#16	// re-pre-load rndkey[0]
 	 add	$cnt,$rounds,#2
 	veor	$tmp0,$tmp0,$dat0
 	veor	$tmp1,$tmp1,$dat1
 	veor	$dat2,$dat2,$tmp2
 	 vld1.32 {q9},[$key_],#16	// re-pre-load rndkey[1]
-	 vorr	$dat0,$in0,$in0
 	vst1.8	{$tmp0},[$out],#16
-	 vorr	$dat1,$in1,$in1
+	 vorr	$dat0,$in0,$in0
 	vst1.8	{$tmp1},[$out],#16
+	 vorr	$dat1,$in1,$in1
 	vst1.8	{$dat2},[$out],#16
 	 vorr	$dat2,$in2,$in2
 	b.hs	.Loop3x_cbc_dec
@@ -574,39 +1674,39 @@ $code.=<<___;
 
 .Lcbc_dec_tail:
 	aesd	$dat1,q8
-	aesd	$dat2,q8
-	vld1.32	{q8},[$key_],#16
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
 	aesimc	$dat2,$dat2
+	vld1.32	{q8},[$key_],#16
 	subs	$cnt,$cnt,#2
 	aesd	$dat1,q9
-	aesd	$dat2,q9
-	vld1.32	{q9},[$key_],#16
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
 	aesimc	$dat2,$dat2
+	vld1.32	{q9},[$key_],#16
 	b.gt	.Lcbc_dec_tail
 
 	aesd	$dat1,q8
-	aesd	$dat2,q8
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q8
 	aesimc	$dat2,$dat2
 	aesd	$dat1,q9
-	aesd	$dat2,q9
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q9
 	aesimc	$dat2,$dat2
 	aesd	$dat1,q12
-	aesd	$dat2,q12
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q12
 	aesimc	$dat2,$dat2
 	 cmn	$len,#0x20
 	aesd	$dat1,q13
-	aesd	$dat2,q13
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q13
 	aesimc	$dat2,$dat2
 	 veor	$tmp1,$ivec,$rndlast
 	aesd	$dat1,q14
-	aesd	$dat2,q14
 	aesimc	$dat1,$dat1
+	aesd	$dat2,q14
 	aesimc	$dat2,$dat2
 	 veor	$tmp2,$in1,$rndlast
 	aesd	$dat1,q15
@@ -650,6 +1750,9 @@ my $step="x12";		# aliases with $tctr2
 my ($dat0,$dat1,$in0,$in1,$tmp0,$tmp1,$ivec,$rndlast)=map("q$_",(0..7));
 my ($dat2,$in2,$tmp2)=map("q$_",(10,11,9));
 
+# used only in 64-bit mode...
+my ($dat3,$dat4,$in3,$in4)=map("q$_",(16..23));
+
 my ($dat,$tmp)=($dat0,$tmp0);
 
 ### q8-q15	preloaded key schedule
@@ -674,8 +1777,11 @@ $code.=<<___;
 	ldr		$rounds,[$key,#240]
 
 	ldr		$ctr, [$ivp, #12]
+#ifdef __ARMEB__
+	vld1.8		{$dat0},[$ivp]
+#else
 	vld1.32		{$dat0},[$ivp]
-
+#endif
 	vld1.32		{q8-q9},[$key]		// load key schedule...
 	sub		$rounds,$rounds,#4
 	mov		$step,#16
@@ -702,75 +1808,243 @@ $code.=<<___;
 	rev		$tctr2, $ctr
 	sub		$len,$len,#3		// bias
 	vmov.32		${dat2}[3],$tctr2
+___
+$code.=<<___	if ($flavour =~ /64/);
+	cmp		$len,#2
+	b.lo		.Loop3x_ctr32
+
+	add		w13,$ctr,#1
+	add		w14,$ctr,#2
+	vorr		$dat3,$dat0,$dat0
+	rev		w13,w13
+	vorr		$dat4,$dat0,$dat0
+	rev		w14,w14
+	vmov.32		${dat3}[3],w13
+	sub		$len,$len,#2		// bias
+	vmov.32		${dat4}[3],w14
+	add		$ctr,$ctr,#2
+	b		.Loop5x_ctr32
+
+.align	4
+.Loop5x_ctr32:
+	aese		$dat0,q8
+	aesmc		$dat0,$dat0
+	aese		$dat1,q8
+	aesmc		$dat1,$dat1
+	aese		$dat2,q8
+	aesmc		$dat2,$dat2
+	aese		$dat3,q8
+	aesmc		$dat3,$dat3
+	aese		$dat4,q8
+	aesmc		$dat4,$dat4
+	vld1.32		{q8},[$key_],#16
+	subs		$cnt,$cnt,#2
+	aese		$dat0,q9
+	aesmc		$dat0,$dat0
+	aese		$dat1,q9
+	aesmc		$dat1,$dat1
+	aese		$dat2,q9
+	aesmc		$dat2,$dat2
+	aese		$dat3,q9
+	aesmc		$dat3,$dat3
+	aese		$dat4,q9
+	aesmc		$dat4,$dat4
+	vld1.32		{q9},[$key_],#16
+	b.gt		.Loop5x_ctr32
+
+	mov		$key_,$key
+	aese		$dat0,q8
+	aesmc		$dat0,$dat0
+	aese		$dat1,q8
+	aesmc		$dat1,$dat1
+	aese		$dat2,q8
+	aesmc		$dat2,$dat2
+	aese		$dat3,q8
+	aesmc		$dat3,$dat3
+	aese		$dat4,q8
+	aesmc		$dat4,$dat4
+	vld1.32	 	{q8},[$key_],#16	// re-pre-load rndkey[0]
+
+	aese		$dat0,q9
+	aesmc		$dat0,$dat0
+	aese		$dat1,q9
+	aesmc		$dat1,$dat1
+	aese		$dat2,q9
+	aesmc		$dat2,$dat2
+	aese		$dat3,q9
+	aesmc		$dat3,$dat3
+	aese		$dat4,q9
+	aesmc		$dat4,$dat4
+	vld1.32	 	{q9},[$key_],#16	// re-pre-load rndkey[1]
+
+	aese		$dat0,q12
+	aesmc		$dat0,$dat0
+	 add		$tctr0,$ctr,#1
+	 add		$tctr1,$ctr,#2
+	aese		$dat1,q12
+	aesmc		$dat1,$dat1
+	 add		$tctr2,$ctr,#3
+	 add		w13,$ctr,#4
+	aese		$dat2,q12
+	aesmc		$dat2,$dat2
+	 add		w14,$ctr,#5
+	 rev		$tctr0,$tctr0
+	aese		$dat3,q12
+	aesmc		$dat3,$dat3
+	 rev		$tctr1,$tctr1
+	 rev		$tctr2,$tctr2
+	aese		$dat4,q12
+	aesmc		$dat4,$dat4
+	 rev		w13,w13
+	 rev		w14,w14
+
+	aese		$dat0,q13
+	aesmc		$dat0,$dat0
+	aese		$dat1,q13
+	aesmc		$dat1,$dat1
+	aese		$dat2,q13
+	aesmc		$dat2,$dat2
+	aese		$dat3,q13
+	aesmc		$dat3,$dat3
+	aese		$dat4,q13
+	aesmc		$dat4,$dat4
+
+	aese		$dat0,q14
+	aesmc		$dat0,$dat0
+	 vld1.8		{$in0},[$inp],#16
+	aese		$dat1,q14
+	aesmc		$dat1,$dat1
+	 vld1.8		{$in1},[$inp],#16
+	aese		$dat2,q14
+	aesmc		$dat2,$dat2
+	 vld1.8		{$in2},[$inp],#16
+	aese		$dat3,q14
+	aesmc		$dat3,$dat3
+	 vld1.8		{$in3},[$inp],#16
+	aese		$dat4,q14
+	aesmc		$dat4,$dat4
+	 vld1.8		{$in4},[$inp],#16
+
+	aese		$dat0,q15
+	 veor		$in0,$in0,$rndlast
+	aese		$dat1,q15
+	 veor		$in1,$in1,$rndlast
+	aese		$dat2,q15
+	 veor		$in2,$in2,$rndlast
+	aese		$dat3,q15
+	 veor		$in3,$in3,$rndlast
+	aese		$dat4,q15
+	 veor		$in4,$in4,$rndlast
+
+	veor		$in0,$in0,$dat0
+	 vorr		$dat0,$ivec,$ivec
+	veor		$in1,$in1,$dat1
+	 vorr		$dat1,$ivec,$ivec
+	veor		$in2,$in2,$dat2
+	 vorr		$dat2,$ivec,$ivec
+	veor		$in3,$in3,$dat3
+	 vorr		$dat3,$ivec,$ivec
+	veor		$in4,$in4,$dat4
+	 vorr		$dat4,$ivec,$ivec
+
+	vst1.8		{$in0},[$out],#16
+	 vmov.32	${dat0}[3],$tctr0
+	vst1.8		{$in1},[$out],#16
+	 vmov.32	${dat1}[3],$tctr1
+	vst1.8		{$in2},[$out],#16
+	 vmov.32	${dat2}[3],$tctr2
+	vst1.8		{$in3},[$out],#16
+	 vmov.32	${dat3}[3],w13
+	vst1.8		{$in4},[$out],#16
+	 vmov.32	${dat4}[3],w14
+
+	mov		$cnt,$rounds
+	cbz		$len,.Lctr32_done
+
+	add		$ctr,$ctr,#5
+	subs		$len,$len,#5
+	b.hs		.Loop5x_ctr32
+
+	add		$len,$len,#5
+	sub		$ctr,$ctr,#5
+
+	cmp		$len,#2
+	mov		$step,#16
+	cclr		$step,lo
+	b.ls		.Lctr32_tail
+
+	sub		$len,$len,#3		// bias
+	add		$ctr,$ctr,#3
+___
+$code.=<<___;
 	b		.Loop3x_ctr32
 
 .align	4
 .Loop3x_ctr32:
 	aese		$dat0,q8
-	aese		$dat1,q8
-	aese		$dat2,q8
-	vld1.32		{q8},[$key_],#16
 	aesmc		$dat0,$dat0
+	aese		$dat1,q8
 	aesmc		$dat1,$dat1
+	aese		$dat2,q8
 	aesmc		$dat2,$dat2
+	vld1.32		{q8},[$key_],#16
 	subs		$cnt,$cnt,#2
 	aese		$dat0,q9
-	aese		$dat1,q9
-	aese		$dat2,q9
-	vld1.32		{q9},[$key_],#16
 	aesmc		$dat0,$dat0
+	aese		$dat1,q9
 	aesmc		$dat1,$dat1
+	aese		$dat2,q9
 	aesmc		$dat2,$dat2
+	vld1.32		{q9},[$key_],#16
 	b.gt		.Loop3x_ctr32
 
 	aese		$dat0,q8
-	aese		$dat1,q8
-	aese		$dat2,q8
-	 mov		$key_,$key
 	aesmc		$tmp0,$dat0
-	 vld1.8		{$in0},[$inp],#16
+	aese		$dat1,q8
 	aesmc		$tmp1,$dat1
-	aesmc		$dat2,$dat2
+	 vld1.8		{$in0},[$inp],#16
 	 vorr		$dat0,$ivec,$ivec
-	aese		$tmp0,q9
+	aese		$dat2,q8
+	aesmc		$dat2,$dat2
 	 vld1.8		{$in1},[$inp],#16
-	aese		$tmp1,q9
-	aese		$dat2,q9
 	 vorr		$dat1,$ivec,$ivec
+	aese		$tmp0,q9
 	aesmc		$tmp0,$tmp0
-	 vld1.8		{$in2},[$inp],#16
+	aese		$tmp1,q9
 	aesmc		$tmp1,$tmp1
+	 vld1.8		{$in2},[$inp],#16
+	 mov		$key_,$key
+	aese		$dat2,q9
 	aesmc		$tmp2,$dat2
 	 vorr		$dat2,$ivec,$ivec
 	 add		$tctr0,$ctr,#1
 	aese		$tmp0,q12
+	aesmc		$tmp0,$tmp0
 	aese		$tmp1,q12
-	aese		$tmp2,q12
+	aesmc		$tmp1,$tmp1
 	 veor		$in0,$in0,$rndlast
 	 add		$tctr1,$ctr,#2
-	aesmc		$tmp0,$tmp0
-	aesmc		$tmp1,$tmp1
+	aese		$tmp2,q12
 	aesmc		$tmp2,$tmp2
 	 veor		$in1,$in1,$rndlast
 	 add		$ctr,$ctr,#3
 	aese		$tmp0,q13
+	aesmc		$tmp0,$tmp0
 	aese		$tmp1,q13
-	aese		$tmp2,q13
+	aesmc		$tmp1,$tmp1
 	 veor		$in2,$in2,$rndlast
 	 rev		$tctr0,$tctr0
-	aesmc		$tmp0,$tmp0
-	 vld1.32	 {q8},[$key_],#16	// re-pre-load rndkey[0]
-	aesmc		$tmp1,$tmp1
+	aese		$tmp2,q13
 	aesmc		$tmp2,$tmp2
 	 vmov.32	${dat0}[3], $tctr0
 	 rev		$tctr1,$tctr1
 	aese		$tmp0,q14
+	aesmc		$tmp0,$tmp0
 	aese		$tmp1,q14
-	aese		$tmp2,q14
+	aesmc		$tmp1,$tmp1
 	 vmov.32	${dat1}[3], $tctr1
 	 rev		$tctr2,$ctr
-	aesmc		$tmp0,$tmp0
-	aesmc		$tmp1,$tmp1
+	aese		$tmp2,q14
 	aesmc		$tmp2,$tmp2
 	 vmov.32	${dat2}[3], $tctr2
 	 subs		$len,$len,#3
@@ -778,13 +2052,14 @@ $code.=<<___;
 	aese		$tmp1,q15
 	aese		$tmp2,q15
 
-	 mov		$cnt,$rounds
 	veor		$in0,$in0,$tmp0
+	 vld1.32	 {q8},[$key_],#16	// re-pre-load rndkey[0]
+	vst1.8		{$in0},[$out],#16
 	veor		$in1,$in1,$tmp1
+	 mov		$cnt,$rounds
+	vst1.8		{$in1},[$out],#16
 	veor		$in2,$in2,$tmp2
 	 vld1.32	 {q9},[$key_],#16	// re-pre-load rndkey[1]
-	vst1.8		{$in0},[$out],#16
-	vst1.8		{$in1},[$out],#16
 	vst1.8		{$in2},[$out],#16
 	b.hs		.Loop3x_ctr32
 
@@ -796,40 +2071,40 @@ $code.=<<___;
 
 .Lctr32_tail:
 	aese		$dat0,q8
-	aese		$dat1,q8
-	vld1.32		{q8},[$key_],#16
 	aesmc		$dat0,$dat0
+	aese		$dat1,q8
 	aesmc		$dat1,$dat1
+	vld1.32		{q8},[$key_],#16
 	subs		$cnt,$cnt,#2
 	aese		$dat0,q9
-	aese		$dat1,q9
-	vld1.32		{q9},[$key_],#16
 	aesmc		$dat0,$dat0
+	aese		$dat1,q9
 	aesmc		$dat1,$dat1
+	vld1.32		{q9},[$key_],#16
 	b.gt		.Lctr32_tail
 
 	aese		$dat0,q8
-	aese		$dat1,q8
 	aesmc		$dat0,$dat0
+	aese		$dat1,q8
 	aesmc		$dat1,$dat1
 	aese		$dat0,q9
-	aese		$dat1,q9
 	aesmc		$dat0,$dat0
+	aese		$dat1,q9
 	aesmc		$dat1,$dat1
 	 vld1.8		{$in0},[$inp],$step
 	aese		$dat0,q12
+	aesmc		$dat0,$dat0
 	aese		$dat1,q12
+	aesmc		$dat1,$dat1
 	 vld1.8		{$in1},[$inp]
-	aesmc		$dat0,$dat0
-	aesmc		$dat1,$dat1
 	aese		$dat0,q13
+	aesmc		$dat0,$dat0
 	aese		$dat1,q13
-	aesmc		$dat0,$dat0
 	aesmc		$dat1,$dat1
-	aese		$dat0,q14
-	aese		$dat1,q14
 	 veor		$in0,$in0,$rndlast
+	aese		$dat0,q14
 	aesmc		$dat0,$dat0
+	aese		$dat1,q14
 	aesmc		$dat1,$dat1
 	 veor		$in1,$in1,$rndlast
 	aese		$dat0,q15
@@ -891,7 +2166,7 @@ if ($flavour =~ /64/) {			######## 64-bit code
 	s/^(\s+)v/$1/o		or	# strip off v prefix
 	s/\bbx\s+lr\b/ret/o;
 
-	# fix up remainig legacy suffixes
+	# fix up remaining legacy suffixes
 	s/\.[ui]?8//o;
 	m/\],#8/o and s/\.16b/\.8b/go;
 	s/\.[ui]?32//o and s/\.16b/\.4s/go;
@@ -914,7 +2189,7 @@ if ($flavour =~ /64/) {			######## 64-bit code
 	    # since ARMv7 instructions are always encoded little-endian.
 	    # correct solution is to use .inst directive, but older
 	    # assemblers don't implement it:-(
-	    sprintf ".byte\t0x%02x,0x%02x,0x%02x,0x%02x\t@ %s %s",
+	    sprintf "INST(0x%02x,0x%02x,0x%02x,0x%02x)\t@ %s %s",
 			$word&0xff,($word>>8)&0xff,
 			($word>>16)&0xff,($word>>24)&0xff,
 			$mnemonic,$arg;
@@ -926,21 +2201,21 @@ if ($flavour =~ /64/) {			######## 64-bit code
 
 	$arg =~ m/q([0-9]+),\s*\{q([0-9]+)\},\s*q([0-9]+)/o &&
 	sprintf	"vtbl.8	d%d,{q%d},d%d\n\t".
-		"vtbl.8	d%d,{q%d},d%d", 2*$1,$2,2*$3, 2*$1+1,$2,2*$3+1;	
+		"vtbl.8	d%d,{q%d},d%d", 2*$1,$2,2*$3, 2*$1+1,$2,2*$3+1;
     }
 
     sub unvdup32 {
 	my $arg=shift;
 
 	$arg =~ m/q([0-9]+),\s*q([0-9]+)\[([0-3])\]/o &&
-	sprintf	"vdup.32	q%d,d%d[%d]",$1,2*$2+($3>>1),$3&1;	
+	sprintf	"vdup.32	q%d,d%d[%d]",$1,2*$2+($3>>1),$3&1;
     }
 
     sub unvmov32 {
 	my $arg=shift;
 
 	$arg =~ m/q([0-9]+)\[([0-3])\],(.*)/o &&
-	sprintf	"vmov.32	d%d[%d],%s",2*$1+($2>>1),$2&1,$3;	
+	sprintf	"vmov.32	d%d[%d],%s",2*$1+($2>>1),$2&1,$3;
     }
 
     foreach(split("\n",$code)) {
@@ -950,21 +2225,24 @@ if ($flavour =~ /64/) {			######## 64-bit code
 	s/\bv([0-9])\.[12468]+[bsd]\b/q$1/go;	# new->old registers
 	s/\/\/\s?/@ /o;				# new->old style commentary
 
-	# fix up remainig new-style suffixes
+	# fix up remaining new-style suffixes
 	s/\{q([0-9]+)\},\s*\[(.+)\],#8/sprintf "{d%d},[$2]!",2*$1/eo	or
 	s/\],#[0-9]+/]!/o;
 
 	s/[v]?(aes\w+)\s+([qv].*)/unaes($1,$2)/geo	or
-	s/cclr\s+([^,]+),\s*([a-z]+)/mov$2	$1,#0/o	or
+	s/cclr\s+([^,]+),\s*([a-z]+)/mov.$2	$1,#0/o	or
 	s/vtbl\.8\s+(.*)/unvtbl($1)/geo			or
 	s/vdup\.32\s+(.*)/unvdup32($1)/geo		or
 	s/vmov\.32\s+(.*)/unvmov32($1)/geo		or
 	s/^(\s+)b\./$1b/o				or
-	s/^(\s+)mov\./$1mov/o				or
 	s/^(\s+)ret/$1bx\tlr/o;
+
+	if (s/^(\s+)mov\.([a-z]+)/$1mov$2/) {
+	    print "	it	$2\n";
+	}
 
 	print $_,"\n";
     }
 }
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";
