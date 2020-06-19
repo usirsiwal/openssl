@@ -7,12 +7,10 @@ jobs:
   build: # name of your job
     executor:
       name: win/default # executor type
-      size: "medium" # resource class, can be "medium", "large", "xlarge", "2xlarge", d
-    # macos:  # indicate that we are using the macOS executor
-    #  xcode: 11.3.0 # indicate our selected version of Xcode
-    #docker:
-    #  - image: "debian:stretch"
-  steps:
+      size: "medium" # resource class, can be "medium", "large", "xlarge", "2xlarge", defaults to "medium" if not specified
+
+    steps:
+
       - checkout
       #- run:
       #    name: Installing SUDO
