@@ -8,7 +8,7 @@ on:
 
 
 jobs:
-  build:
+  build_on_unix:
 
     runs-on: ${{ matrix.os }}
     strategy:
@@ -23,4 +23,13 @@ jobs:
       run: make
     - name: make test
       run: make test
-
+  build_on_windows:
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v2
+      - name: configure
+        run: perl Configure VC-WIN64A 
+      - name: make
+        run: nmake
+      - name: make test
+        run: nmake test
