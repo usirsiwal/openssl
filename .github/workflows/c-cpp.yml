@@ -28,6 +28,10 @@ jobs:
     steps:
       - name: install nasm
         run: choco install nasm
+      - name: print path
+        run: $env:path
+      - name: test choco
+        run: nasm
       - uses: actions/checkout@v2
       - name: configure
         run: perl Configure VC-WIN64A 
