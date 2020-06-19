@@ -1,20 +1,18 @@
-version: 2
+version: 2.1 # Use version 2.1 to enable orb usage.
 
 orbs:
-  win: circleci/windows@2.2.0
-
+  win: circleci/windows@2.2.0 # The Windows orb give you everything you need to start using the Windows executor.
 
 jobs:
-  build:
+  build: # name of your job
     executor:
-      name: win/default
-      shell: powershell.exe
-
+      name: win/default # executor type
+      size: "medium" # resource class, can be "medium", "large", "xlarge", "2xlarge", d
     # macos:  # indicate that we are using the macOS executor
     #  xcode: 11.3.0 # indicate our selected version of Xcode
     #docker:
     #  - image: "debian:stretch"
-    steps:
+  steps:
       - checkout
       #- run:
       #    name: Installing SUDO
