@@ -28,7 +28,7 @@ jobs:
     steps:
       - name: install nasm
         run: |
-             choco install nasm
+             choco install -y -d nasm
              echo "::add-path::C:\Program Files\NASM"
       - name: print path
         run: $env:path
