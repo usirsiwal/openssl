@@ -41,11 +41,8 @@ jobs:
       - name: make
         shell: cmd
         run: |
-              "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 &
-              set   &
-              nmake
+              "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 && nmake
       - name: make test
         shell: cmd
         run: |
-             "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 &
-             nmake test
+             "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 &&   nmake test
