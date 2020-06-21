@@ -39,6 +39,7 @@ jobs:
       - name: configure
         run: perl Configure VC-WIN64A 
       - name: make
+        shell: cmd
         run: |
               "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" 
               set     
