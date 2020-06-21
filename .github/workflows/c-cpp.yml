@@ -40,10 +40,7 @@ jobs:
         run: perl Configure VC-WIN64A 
       - name: make
         run: |
-              echo "nmake...."
-              Get-ChildItem "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise" -Recurse nmake.exe
               $env:path     
-              "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
               nmake
       - name: make test
         run: nmake test
