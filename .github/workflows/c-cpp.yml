@@ -40,7 +40,8 @@ jobs:
         run: perl Configure VC-WIN64A 
       - name: make
         run: |
-              $env:path     
+              "c:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64
+              set     
               nmake
       - name: make test
         run: nmake test
