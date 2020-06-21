@@ -28,10 +28,10 @@ jobs:
     steps:
       - name: install nasm
         run: |
-             Get-ChildItem "c:\Program Files (x86)\Microsoft Visual Studio\2019\Community" -Recurse nmake.exe
              choco install -y -d nasm
              dir "c:\program Files"
              echo "::add-path::C:\Program Files\NASM"
+             Get-ChildItem "c:\Program Files (x86)\Microsoft Visual Studio\2019\Community" -Recurse nmake.exe
       - name: print path
         run: $env:path      
       - uses: actions/checkout@v2
