@@ -29,7 +29,11 @@ jobs:
       - run:
           name: Build
           command: |
-              dir "c:\Program Files (x86)\Microsoft Visual Studio\"
+              dir "c:\Program Files (x86)"
+      - run:
+          name: Build
+          command: |
+              dir "c:\Program Files"
       - run:
           name: Build Step 2
           command: | 
