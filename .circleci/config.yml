@@ -8,7 +8,7 @@ jobs:
     executor:
       name: win/default # executor type
       size: "medium" # resource class, can be "medium", "large", "xlarge", "2xlarge", defaults to "medium" if not specified
-
+      shell: cmd.exe
     steps:
 
       - checkout
@@ -21,24 +21,16 @@ jobs:
       - run:
           name: install packages
           command: |
-            choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+            #choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
             choco install nasm
             choco install activeperl
       - run:
           name: Creating Build Files
-          command: 'perl Configure VC-WIN32 no-asm --prefix=c:/openssl'
+          command: perl Configure VC-WIN64A 
       #- run:
       #    name: run msdos
       #    command: 'ms\do_ms'
       - run:
-          name: Creating Binary Files
-          command: 'nmake -f ms\ntdll.mak'
-      - run:
-          name: Point Unit Testing
-          command: 'nmake -f ms\ntdll.mak test'
-      - run:
-          name: install
-          command: 'nmake -f ms\ntdll.mak install'
-      - store_artifacts:
-          path: /tmp/openssl
-          destination: openssl
+          name: Build
+          command: |
+              "c:\Program Files (x86)\Microsoft Visual Studio\2019\Command\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 && nmake
