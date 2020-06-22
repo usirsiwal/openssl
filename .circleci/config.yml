@@ -26,12 +26,12 @@ jobs:
       - run:
           name: Creating Build Files
           command: perl Configure VC-WIN64A 
-      #- run:
-      #    name: run msdos
-      #    command: 'ms\do_ms'
       - run:
           name: Build
           command: |
               dir "c:\Program Files (x86)\Microsoft Visual Studio\"
+      - run:
+          name: Build Step 2
+          command: | 
               dir "c:\Program Files (x86)\Microsoft Visual Studio\2019"
               "c:\Program Files (x86)\Microsoft Visual Studio\2019\Command\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 && nmake
