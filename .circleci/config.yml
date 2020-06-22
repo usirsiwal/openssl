@@ -8,7 +8,6 @@ jobs:
     executor:
       name: win/default # executor type
       size: "medium" # resource class, can be "medium", "large", "xlarge", "2xlarge", defaults to "medium" if not specified
-      shell: cmd.exe
     steps:
 
       - checkout
@@ -33,9 +32,9 @@ jobs:
       - run:
           name: Build
           command: |
-              dir "c:\Program Files"
+              ls "/c/Program Files"
       - run:
           name: Build Step 2
           command: | 
-              dir "c:\Program Files (x86)\Microsoft Visual Studio\2019"
-              "c:\Program Files (x86)\Microsoft Visual Studio\2019\Command\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 && nmake
+              ls "/c/Program Files (x86)/Microsoft Visual Studio/2019"
+              "/c/Program Files (x86)/Microsoft Visual Studio/2019/Command/VC/Auxiliary/Build/vcvarsall.bat" x86_amd64 && nmake
