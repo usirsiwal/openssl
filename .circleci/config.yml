@@ -26,14 +26,6 @@ jobs:
           name: Creating Build Files
           command: perl Configure VC-WIN64A 
       - run:
-          name: Build
-          command: |
-              dir "c:\Program Files (x86)"
-      - run:
-          name: Build
-          command: |
-              ls "/c/Program Files"
-      - run:
           name: Build Step 2
           command: | 
               ls "/c/Program Files (x86)/Microsoft Visual Studio/2019"
