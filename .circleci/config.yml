@@ -8,6 +8,7 @@ jobs:
     executor:
       name: win/default # executor type
       size: "medium" # resource class, can be "medium", "large", "xlarge", "2xlarge", defaults to "medium" if not specified
+      shell: bash
     steps:
 
       - checkout
@@ -28,5 +29,4 @@ jobs:
       - run:
           name: Build Step 2
           command: | 
-              ls "/c/Program Files (x86)/Microsoft Visual Studio/2019"
               "/c/Program Files (x86)/Microsoft Visual Studio/2019/Command/VC/Auxiliary/Build/vcvarsall.bat" x86_amd64 && nmake
