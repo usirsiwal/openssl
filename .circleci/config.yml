@@ -32,4 +32,6 @@ jobs:
       - run:
           name: Build
           command: |
+              dir "c:\Program Files (x86)\Microsoft Visual Studio\"
+              dir "c:\Program Files (x86)\Microsoft Visual Studio\2019"
               "c:\Program Files (x86)\Microsoft Visual Studio\2019\Command\VC\Auxiliary\Build\vcvarsall.bat" x86_amd64 && nmake
